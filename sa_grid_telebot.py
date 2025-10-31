@@ -15,7 +15,8 @@ import os
 import sys
 import time
 import signal
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Optional
 
 import requests
 from paho.mqtt.client import Client, CallbackAPIVersion
@@ -40,8 +41,30 @@ JSON_FIELD = ""                 # если payload JSON, указать поле
 # Порог "есть/нет сети" для напряжения (если используем grid_voltage/state)
 GRID_MIN_VOLT = 180.0
 
+# Топики для дополнительных уведомлений
+LOAD_TOPIC = "solar_assistant/inverter_1/load_power/state"
+LOAD_JSON_FIELD = ""
+
+BATTERY_SOC_TOPIC = "solar_assistant/inverter_1/battery_soc/state"
+BATTERY_JSON_FIELD = ""
+
+# Пороговые значения (Вт и %)
+LOAD_HIGH_THRESHOLD = 1700.0    # высокая нагрузка
+LOAD_HIGH_CLEAR = 1500.0        # ниже этого сбрасываем статус высокой нагрузки
+LOAD_CRITICAL_THRESHOLD = 2200.0  # предельная нагрузка
+LOAD_CRITICAL_CLEAR = 2000.0
+
+BATTERY_FULL_THRESHOLD = 99.5
+BATTERY_FULL_CLEAR = 98.0
+BATTERY_HALF_THRESHOLD = 50.0
+BATTERY_HALF_CLEAR = 52.0
+BATTERY_LOW_THRESHOLD = 20.0
+BATTERY_LOW_CLEAR = 22.0
+BATTERY_NEAR_EMPTY_THRESHOLD = 10.0
+BATTERY_NEAR_EMPTY_CLEAR = 12.0
+
 # Анти-дребезг и подавление дубликатов
-DEBOUNCE_SECONDS = 5            # состояние должно удержаться не менее N сек
+DEBOUNCE_SECONDS = 1            # состояние должно удержаться не менее N сек
 SUPPRESS_REPEAT_SECONDS = 60    # одинаковые уведомления не чаще, чем раз в N сек
 
 # Игнорировать первое retained-сообщение после подключения
@@ -92,6 +115,41 @@ def save_state(state: Any) -> None:
         print(f"[ERR] save_state: {e}", file=sys.stderr)
 
 
+@dataclass
+class ThresholdEvent:
+    """Описывает пороговое уведомление для числового значения."""
+
+    direction: str  # 'above' или 'below'
+    trigger: float
+    clear: float
+    message: str
+    active: bool = False
+    last_sent: float = 0.0
+
+    def evaluate(self, value: float, now: float) -> bool:
+        """Возвращает True, если нужно отправить уведомление."""
+        triggered = False
+
+        if self.direction == "above":
+            if value >= self.trigger and not self.active:
+                self.active = True
+                triggered = True
+            elif value <= self.clear and self.active:
+                self.active = False
+        elif self.direction == "below":
+            if value <= self.trigger and not self.active:
+                self.active = True
+                triggered = True
+            elif value >= self.clear and self.active:
+                self.active = False
+
+        if triggered:
+            if (now - self.last_sent) >= SUPPRESS_REPEAT_SECONDS:
+                self.last_sent = now
+                return True
+        return False
+
+
 def get_json_path(d: Any, path: str):
     """Достаём значение по пути вида 'a.b.c' из словаря."""
     cur = d
@@ -100,6 +158,23 @@ def get_json_path(d: Any, path: str):
             return None
         cur = cur[part]
     return cur
+
+
+def extract_numeric(payload: str, json_field: str = "") -> Optional[float]:
+    """Возвращает числовое значение из payload (простое число или JSON)."""
+    value: Any = payload
+
+    if json_field:
+        try:
+            data = json.loads(payload)
+            value = get_json_path(data, json_field)
+        except Exception:
+            return None
+
+    try:
+        return float(value)
+    except Exception:
+        return None
 
 
 def normalize_state(val: Any) -> bool | None:
@@ -171,26 +246,89 @@ class GridWatcher:
 
         self.first_message_seen = not IGNORE_FIRST_RETAINED  # если игнорируем первое retained — начнём с False
 
+        self.load_events = [
+            ThresholdEvent(
+                direction="above",
+                trigger=LOAD_HIGH_THRESHOLD,
+                clear=LOAD_HIGH_CLEAR,
+                message=f"{TG_PREFIX}: ⚠️ Высокая нагрузка {{value_kw:.2f}} кВт",
+            ),
+            ThresholdEvent(
+                direction="above",
+                trigger=LOAD_CRITICAL_THRESHOLD,
+                clear=LOAD_CRITICAL_CLEAR,
+                message=f"{TG_PREFIX}: 🚨 Предельная нагрузка {{value_kw:.2f}} кВт",
+            ),
+        ]
+
+        self.battery_events = [
+            ThresholdEvent(
+                direction="above",
+                trigger=BATTERY_FULL_THRESHOLD,
+                clear=BATTERY_FULL_CLEAR,
+                message=f"{TG_PREFIX}: 🔋 Батарея зарядилась ({{percent:.0f}}%)",
+            ),
+            ThresholdEvent(
+                direction="below",
+                trigger=BATTERY_HALF_THRESHOLD,
+                clear=BATTERY_HALF_CLEAR,
+                message=f"{TG_PREFIX}: 🔋 Батарея разряжена наполовину ({{percent:.0f}}%)",
+            ),
+            ThresholdEvent(
+                direction="below",
+                trigger=BATTERY_LOW_THRESHOLD,
+                clear=BATTERY_LOW_CLEAR,
+                message=f"{TG_PREFIX}: 🔋 Батарея разряжена на 20% ({{percent:.0f}}%)",
+            ),
+            ThresholdEvent(
+                direction="below",
+                trigger=BATTERY_NEAR_EMPTY_THRESHOLD,
+                clear=BATTERY_NEAR_EMPTY_CLEAR,
+                message=f"{TG_PREFIX}: 🔋 Батарея почти разрядилась ({{percent:.0f}}%)",
+            ),
+        ]
+
     # Новый прототип on_connect для v5
     def on_connect(self, client, userdata, flags, reason_code, properties=None):
         print(f"[MQTT] Connected, rc={reason_code}")
         client.subscribe(MQTT_TOPIC, qos=1)
+        if LOAD_TOPIC:
+            client.subscribe(LOAD_TOPIC, qos=1)
+        if BATTERY_SOC_TOPIC:
+            client.subscribe(BATTERY_SOC_TOPIC, qos=1)
 
     def on_message(self, client, userdata, msg):
         now = time.time()
-
-        # Обработка retained первого сообщения (по желанию)
-        if IGNORE_FIRST_RETAINED and not self.first_message_seen and msg.retain:
-            self.first_message_seen = True
-            print("[MQTT] Ignored first retained message")
-            return
-        self.first_message_seen = True
+        topic = msg.topic.decode("utf-8") if isinstance(msg.topic, bytes) else msg.topic
 
         payload_raw = msg.payload
         try:
             payload = payload_raw.decode("utf-8", "ignore").strip()
         except Exception:
             payload = str(payload_raw)
+
+        if topic == MQTT_TOPIC:
+            if IGNORE_FIRST_RETAINED and not self.first_message_seen and msg.retain:
+                self.first_message_seen = True
+                print("[MQTT] Ignored first retained message")
+                return
+            self.first_message_seen = True
+            self.process_grid_payload(payload, now)
+            return
+
+        if topic == LOAD_TOPIC and LOAD_TOPIC:
+            self.process_load_payload(payload, now)
+            return
+
+        if topic == BATTERY_SOC_TOPIC and BATTERY_SOC_TOPIC:
+            self.process_battery_payload(payload, now)
+            return
+
+        # Неизвестный топик — логируем для отладки
+        print(f"[WARN] Unexpected topic {topic}")
+
+    def process_grid_payload(self, payload: str, now: float) -> None:
+        """Обрабатывает сообщения о состоянии городской сети."""
 
         # Извлекаем значение
         new_state: bool | None = None
@@ -238,6 +376,34 @@ class GridWatcher:
 
             # Сброс pending
             self.pending_state = None
+
+    def process_load_payload(self, payload: str, now: float) -> None:
+        """Отправляет уведомления по нагрузке."""
+        value = extract_numeric(payload, LOAD_JSON_FIELD)
+        if value is None:
+            print(f"[WARN] Can't parse load value: {payload[:200]}")
+            return
+
+        kw = value / 1000.0
+
+        for event in self.load_events:
+            if event.evaluate(value, now):
+                msg = event.message.format(value=value, value_kw=kw)
+                send_telegram(msg)
+
+    def process_battery_payload(self, payload: str, now: float) -> None:
+        """Отправляет уведомления по состоянию батареи."""
+        value = extract_numeric(payload, BATTERY_JSON_FIELD)
+        if value is None:
+            print(f"[WARN] Can't parse battery value: {payload[:200]}")
+            return
+
+        percent = max(0.0, min(100.0, value))
+
+        for event in self.battery_events:
+            if event.evaluate(percent, now):
+                msg = event.message.format(percent=percent, value=percent)
+                send_telegram(msg)
 
     def run(self):
         self.client.connect(MQTT_HOST, MQTT_PORT, keepalive=MQTT_KEEPALIVE)
