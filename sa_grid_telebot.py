@@ -98,6 +98,16 @@ def cfg_get_float(cfg: dict[str, Any], path: list[str], default: float) -> float
         return default
 
 
+def cfg_get_str(cfg: dict[str, Any], path: list[str], default: str) -> str:
+    value = cfg_get(cfg, path, default)
+    if value is None:
+        return default
+    try:
+        return str(value)
+    except Exception:
+        return default
+
+
 def cfg_get_list(cfg: dict[str, Any], path: list[str], default: list[str]) -> list[str]:
     value = cfg_get(cfg, path, default)
     if isinstance(value, (list, tuple, set)):
@@ -111,10 +121,18 @@ def cfg_get_list(cfg: dict[str, Any], path: list[str], default: list[str]) -> li
 CONFIG = load_json_config(CONFIG_FILE)
 
 # Топики для дополнительных уведомлений
-LOAD_TOPIC = "solar_assistant/inverter_1/load_power/state"
+LOAD_TOPIC = cfg_get_str(
+    CONFIG,
+    ["load", "topic"],
+    "solar_assistant/inverter_1/load_power/state",
+)
 LOAD_JSON_FIELD = ""
 
-BATTERY_SOC_TOPIC = "solar_assistant/inverter_1/battery_soc/state"
+BATTERY_SOC_TOPIC = cfg_get_str(
+    CONFIG,
+    ["battery", "topic"],
+    "solar_assistant/total/battery_state_of_charge/state",
+)
 BATTERY_JSON_FIELD = ""
 
 # Пороговые значения (Вт и %)

@@ -9,12 +9,14 @@
     "min_voltage": 180.0
   },
   "load": {
+    "topic": "solar_assistant/inverter_1/load_power/state",
     "high_threshold": 1700.0,
     "high_clear": 1500.0,
     "critical_threshold": 2200.0,
     "critical_clear": 2000.0
   },
   "battery": {
+    "topic": "solar_assistant/total/battery_state_of_charge/state",
     "full_threshold": 99.5,
     "full_clear": 98.0,
     "half_threshold": 50.0,
