@@ -1,0 +1,27 @@
+{
+  "telegram": {
+    "token": "112233445:*****************",
+    "chat_ids": [
+      "123456789"
+    ]
+  },
+  "grid": {
+    "min_voltage": 180.0
+  },
+  "load": {
+    "high_threshold": 1700.0,
+    "high_clear": 1500.0,
+    "critical_threshold": 2200.0,
+    "critical_clear": 2000.0
+  },
+  "battery": {
+    "full_threshold": 99.5,
+    "full_clear": 98.0,
+    "half_threshold": 50.0,
+    "half_clear": 52.0,
+    "low_threshold": 20.0,
+    "low_clear": 22.0,
+    "near_empty_threshold": 10.0,
+    "near_empty_clear": 12.0
+  }
+}

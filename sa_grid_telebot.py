@@ -38,8 +38,77 @@ MQTT_KEEPALIVE = 60
 MQTT_TOPIC = "solar_assistant/inverter_1/grid_voltage/state"
 JSON_FIELD = ""                 # если payload JSON, указать поле (например "grid.connected"); иначе оставить ""
 
-# Порог "есть/нет сети" для напряжения (если используем grid_voltage/state)
-GRID_MIN_VOLT = 180.0
+# Путь к внешнему файлу конфигурации (можно переопределить переменной окружения SA_GRID_CONFIG_FILE)
+CONFIG_FILE = os.environ.get(
+    "SA_GRID_CONFIG_FILE",
+    os.path.join(os.path.dirname(__file__), "sa_grid_config.json"),
+)
+
+# Значения по умолчанию (используются, если параметр не найден в конфиге)
+DEFAULT_GRID_MIN_VOLT = 180.0
+DEFAULT_LOAD_HIGH_THRESHOLD = 1700.0
+DEFAULT_LOAD_HIGH_CLEAR = 1500.0
+DEFAULT_LOAD_CRITICAL_THRESHOLD = 2200.0
+DEFAULT_LOAD_CRITICAL_CLEAR = 2000.0
+DEFAULT_BATTERY_FULL_THRESHOLD = 99.5
+DEFAULT_BATTERY_FULL_CLEAR = 98.0
+DEFAULT_BATTERY_HALF_THRESHOLD = 50.0
+DEFAULT_BATTERY_HALF_CLEAR = 52.0
+DEFAULT_BATTERY_LOW_THRESHOLD = 20.0
+DEFAULT_BATTERY_LOW_CLEAR = 22.0
+DEFAULT_BATTERY_NEAR_EMPTY_THRESHOLD = 10.0
+DEFAULT_BATTERY_NEAR_EMPTY_CLEAR = 12.0
+DEFAULT_TG_TOKEN = "112233445:*****************"
+DEFAULT_TG_CHAT_IDS: list[str] = ["123456789"]
+
+
+def load_json_config(path: str) -> dict[str, Any]:
+    """Загружает JSON-конфиг. Возвращает пустой словарь при ошибке."""
+
+    if not path:
+        return {}
+
+    if not os.path.exists(path):
+        print(f"[WARN] Config file not found: {path}", file=sys.stderr)
+        return {}
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"[ERR] Failed to read config {path}: {e}", file=sys.stderr)
+        return {}
+
+
+def cfg_get(cfg: dict[str, Any], path: list[str], default: Any) -> Any:
+    cur: Any = cfg
+    for key in path:
+        if isinstance(cur, dict) and key in cur:
+            cur = cur[key]
+        else:
+            return default
+    return cur
+
+
+def cfg_get_float(cfg: dict[str, Any], path: list[str], default: float) -> float:
+    value = cfg_get(cfg, path, default)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def cfg_get_list(cfg: dict[str, Any], path: list[str], default: list[str]) -> list[str]:
+    value = cfg_get(cfg, path, default)
+    if isinstance(value, (list, tuple, set)):
+        return [str(v) for v in value]
+    if isinstance(value, str):
+        # допускаем перечисление через запятую
+        return [s.strip() for s in value.split(",") if s.strip()]
+    return default
+
+
+CONFIG = load_json_config(CONFIG_FILE)
 
 # Топики для дополнительных уведомлений
 LOAD_TOPIC = "solar_assistant/inverter_1/load_power/state"
@@ -49,19 +118,20 @@ BATTERY_SOC_TOPIC = "solar_assistant/inverter_1/battery_soc/state"
 BATTERY_JSON_FIELD = ""
 
 # Пороговые значения (Вт и %)
-LOAD_HIGH_THRESHOLD = 1700.0    # высокая нагрузка
-LOAD_HIGH_CLEAR = 1500.0        # ниже этого сбрасываем статус высокой нагрузки
-LOAD_CRITICAL_THRESHOLD = 2200.0  # предельная нагрузка
-LOAD_CRITICAL_CLEAR = 2000.0
+GRID_MIN_VOLT = cfg_get_float(CONFIG, ["grid", "min_voltage"], DEFAULT_GRID_MIN_VOLT)
+LOAD_HIGH_THRESHOLD = cfg_get_float(CONFIG, ["load", "high_threshold"], DEFAULT_LOAD_HIGH_THRESHOLD)
+LOAD_HIGH_CLEAR = cfg_get_float(CONFIG, ["load", "high_clear"], DEFAULT_LOAD_HIGH_CLEAR)
+LOAD_CRITICAL_THRESHOLD = cfg_get_float(CONFIG, ["load", "critical_threshold"], DEFAULT_LOAD_CRITICAL_THRESHOLD)
+LOAD_CRITICAL_CLEAR = cfg_get_float(CONFIG, ["load", "critical_clear"], DEFAULT_LOAD_CRITICAL_CLEAR)
 
-BATTERY_FULL_THRESHOLD = 99.5
-BATTERY_FULL_CLEAR = 98.0
-BATTERY_HALF_THRESHOLD = 50.0
-BATTERY_HALF_CLEAR = 52.0
-BATTERY_LOW_THRESHOLD = 20.0
-BATTERY_LOW_CLEAR = 22.0
-BATTERY_NEAR_EMPTY_THRESHOLD = 10.0
-BATTERY_NEAR_EMPTY_CLEAR = 12.0
+BATTERY_FULL_THRESHOLD = cfg_get_float(CONFIG, ["battery", "full_threshold"], DEFAULT_BATTERY_FULL_THRESHOLD)
+BATTERY_FULL_CLEAR = cfg_get_float(CONFIG, ["battery", "full_clear"], DEFAULT_BATTERY_FULL_CLEAR)
+BATTERY_HALF_THRESHOLD = cfg_get_float(CONFIG, ["battery", "half_threshold"], DEFAULT_BATTERY_HALF_THRESHOLD)
+BATTERY_HALF_CLEAR = cfg_get_float(CONFIG, ["battery", "half_clear"], DEFAULT_BATTERY_HALF_CLEAR)
+BATTERY_LOW_THRESHOLD = cfg_get_float(CONFIG, ["battery", "low_threshold"], DEFAULT_BATTERY_LOW_THRESHOLD)
+BATTERY_LOW_CLEAR = cfg_get_float(CONFIG, ["battery", "low_clear"], DEFAULT_BATTERY_LOW_CLEAR)
+BATTERY_NEAR_EMPTY_THRESHOLD = cfg_get_float(CONFIG, ["battery", "near_empty_threshold"], DEFAULT_BATTERY_NEAR_EMPTY_THRESHOLD)
+BATTERY_NEAR_EMPTY_CLEAR = cfg_get_float(CONFIG, ["battery", "near_empty_clear"], DEFAULT_BATTERY_NEAR_EMPTY_CLEAR)
 
 # Анти-дребезг и подавление дубликатов
 DEBOUNCE_SECONDS = 1            # состояние должно удержаться не менее N сек
@@ -71,8 +141,8 @@ SUPPRESS_REPEAT_SECONDS = 60    # одинаковые уведомления н
 IGNORE_FIRST_RETAINED = True
 
 # Telegram
-TG_TOKEN = "112233445:*****************" 
-TG_CHAT_ID = "123456789"        # ваш chat_id / id группы / id канала (бот должен иметь права писать)
+TG_TOKEN = str(cfg_get(CONFIG, ["telegram", "token"], DEFAULT_TG_TOKEN))
+TG_CHAT_IDS = cfg_get_list(CONFIG, ["telegram", "chat_ids"], DEFAULT_TG_CHAT_IDS)
 TG_PREFIX = "⚡️Grid"           # префикс в тексте уведомления
 
 # Хранилище последнего состояния (для переживания перезапусков)
@@ -84,15 +154,51 @@ STATE_FILE = "/var/lib/sa-grid-telebot/last_state.json"
 os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
 
 
-def send_telegram(text: str) -> None:
-    """Отправка сообщения в Telegram."""
+def _normalize_chat_ids(raw_ids: Any) -> list[str]:
+    """Возвращает список chat_id из настроек."""
+
+    ids: list[str] = []
+
+    if isinstance(raw_ids, (list, tuple, set)):
+        candidates = raw_ids
+    else:
+        text = str(raw_ids).strip()
+        if not text:
+            return []
+        candidates = text.split(",")
+
+    for cid in candidates:
+        s = str(cid).strip()
+        if s:
+            ids.append(s)
+
+    return ids
+
+
+def send_telegram(text: str, chat_id: str) -> None:
+    """Отправка сообщения в Telegram для одного получателя."""
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     try:
-        r = requests.post(url, json={"chat_id": TG_CHAT_ID, "text": text}, timeout=10)
+        r = requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=10)
         if r.status_code != 200:
-            print(f"[ERR] Telegram HTTP {r.status_code}: {r.text[:200]}", file=sys.stderr)
+            print(
+                f"[ERR] Telegram HTTP {r.status_code} for {chat_id}: {r.text[:200]}",
+                file=sys.stderr,
+            )
     except Exception as e:
-        print(f"[ERR] Telegram send failed: {e}", file=sys.stderr)
+        print(f"[ERR] Telegram send failed for {chat_id}: {e}", file=sys.stderr)
+
+
+def broadcast_telegram(text: str) -> None:
+    """Отправляет сообщение всем настроенным получателям."""
+
+    chat_ids = _normalize_chat_ids(TG_CHAT_IDS)
+    if not chat_ids:
+        print("[WARN] Telegram chat IDs list is empty", file=sys.stderr)
+        return
+
+    for chat_id in chat_ids:
+        send_telegram(text, chat_id)
 
 
 def load_state() -> dict:
@@ -366,8 +472,12 @@ class GridWatcher:
                 return
 
             # Отправляем Telegram
-            txt = f"{TG_PREFIX}: 🟢 Сеть появилась" if new_state else f"{TG_PREFIX}: 🔴 Сеть пропала"
-            send_telegram(txt)
+            txt = (
+                f"{TG_PREFIX}: 🟢 Сеть появилась"
+                if new_state
+                else f"{TG_PREFIX}: 🔴 Сеть пропала"
+            )
+            broadcast_telegram(txt)
 
             # Запоминаем отправленное состояние
             self.last_sent_state = new_state
@@ -389,7 +499,7 @@ class GridWatcher:
         for event in self.load_events:
             if event.evaluate(value, now):
                 msg = event.message.format(value=value, value_kw=kw)
-                send_telegram(msg)
+                broadcast_telegram(msg)
 
     def process_battery_payload(self, payload: str, now: float) -> None:
         """Отправляет уведомления по состоянию батареи."""
@@ -403,7 +513,7 @@ class GridWatcher:
         for event in self.battery_events:
             if event.evaluate(percent, now):
                 msg = event.message.format(percent=percent, value=percent)
-                send_telegram(msg)
+                broadcast_telegram(msg)
 
     def run(self):
         self.client.connect(MQTT_HOST, MQTT_PORT, keepalive=MQTT_KEEPALIVE)
