@@ -457,6 +457,11 @@ class GridWatcher:
                 ),
             ]
 
+        self.battery_energy_reference_kwh: float | None = None
+        self.battery_energy_reference_total_kwh: float = 0.0
+        self.battery_energy_delivered_kwh: float = 0.0
+        self.last_battery_energy_value_kwh: float | None = None
+
     # Новый прототип on_connect для v5
     def on_connect(self, client, userdata, flags, reason_code, properties=None):
         print(f"[MQTT] Connected, rc={reason_code}")
@@ -544,6 +549,8 @@ class GridWatcher:
             if self.last_sent_state == new_state and (now - self.last_send_ts) < SUPPRESS_REPEAT_SECONDS:
                 return
 
+            previous_state = self.last_sent_state
+
             # Отправляем Telegram
             txt = (
                 f"{TG_PREFIX}: 🟢 Сеть появилась"
@@ -559,6 +566,9 @@ class GridWatcher:
 
             # Сброс pending
             self.pending_state = None
+
+            if previous_state != new_state:
+                self.handle_grid_state_change(new_state)
 
     def process_load_payload(self, payload: str, now: float) -> None:
         """Отправляет уведомления по нагрузке."""
@@ -585,6 +595,9 @@ class GridWatcher:
 
         grid_present = self.current_grid_state()
 
+        if grid_present and percent >= 100.0:
+            self.reset_battery_energy_tracking()
+
         for event in self.battery_soc_events:
             if event.require_grid and not grid_present:
                 continue
@@ -602,21 +615,74 @@ class GridWatcher:
 
         energy_kwh = max(0.0, value)
 
+        self.last_battery_energy_value_kwh = energy_kwh
+
+        if (
+            self.battery_energy_reference_kwh is None
+            and not self.current_grid_state()
+        ):
+            self.start_battery_discharge_tracking()
+
+        if self.battery_energy_reference_kwh is not None:
+            diff = energy_kwh - self.battery_energy_reference_kwh
+            if diff < -0.0001:
+                self.battery_energy_reference_kwh = energy_kwh
+                self.battery_energy_reference_total_kwh = self.battery_energy_delivered_kwh
+                diff = 0.0
+            elif diff < 0:
+                diff = 0.0
+            self.battery_energy_delivered_kwh = (
+                self.battery_energy_reference_total_kwh + diff
+            )
+
+        delivered_kwh = self.battery_energy_delivered_kwh
+
         for event in self.battery_energy_events:
-            if event.evaluate(energy_kwh, now):
+            if event.evaluate(delivered_kwh, now):
                 percent_of_capacity = (
                     0.0
                     if BATTERY_CALCULATED_CAPACITY_KWH <= 0
-                    else min(100.0, (energy_kwh / BATTERY_CALCULATED_CAPACITY_KWH) * 100.0)
+                    else min(
+                        100.0,
+                        (delivered_kwh / BATTERY_CALCULATED_CAPACITY_KWH) * 100.0,
+                    )
                 )
                 msg = event.message.format(
-                    value=energy_kwh,
-                    value_kwh=energy_kwh,
+                    value=delivered_kwh,
+                    value_kwh=delivered_kwh,
                     percent=percent_of_capacity,
                     percent_of_capacity=percent_of_capacity,
                     capacity_kwh=BATTERY_CALCULATED_CAPACITY_KWH,
                 )
                 broadcast_telegram(msg)
+
+    def handle_grid_state_change(self, grid_present: bool) -> None:
+        if grid_present:
+            self.stop_battery_discharge_tracking()
+        else:
+            self.start_battery_discharge_tracking()
+
+    def start_battery_discharge_tracking(self) -> None:
+        if not self.battery_energy_events:
+            return
+        self.battery_energy_reference_kwh = self.last_battery_energy_value_kwh
+        self.battery_energy_reference_total_kwh = self.battery_energy_delivered_kwh
+
+    def stop_battery_discharge_tracking(self) -> None:
+        if not self.battery_energy_events:
+            return
+        self.battery_energy_reference_kwh = None
+        self.battery_energy_reference_total_kwh = self.battery_energy_delivered_kwh
+
+    def reset_battery_energy_tracking(self) -> None:
+        if not self.battery_energy_events:
+            return
+        self.battery_energy_delivered_kwh = 0.0
+        self.battery_energy_reference_total_kwh = 0.0
+        self.battery_energy_reference_kwh = None
+        for event in self.battery_energy_events:
+            event.active = False
+            event.last_sent = 0.0
 
     def current_grid_state(self) -> bool:
         """Возвращает True, если известно, что городская сеть присутствует."""
