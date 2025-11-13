@@ -17,6 +17,9 @@
   },
   "battery": {
     "topic": "solar_assistant/total/battery_state_of_charge/state",
+    "energy_topic": "solar_assistant/total/battery_energy_out/state",
+    "calculated_capacity_comment": "Указывать расчётную ёмкость в Ваттах (напряжение умножить на Ампер*часы)",
+    "calculated_capacity_w": 5000.0,
     "full_threshold": 99.5,
     "full_clear": 98.0,
     "half_threshold": 50.0,

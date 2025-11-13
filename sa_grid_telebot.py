@@ -58,6 +58,8 @@ DEFAULT_BATTERY_LOW_THRESHOLD = 20.0
 DEFAULT_BATTERY_LOW_CLEAR = 22.0
 DEFAULT_BATTERY_NEAR_EMPTY_THRESHOLD = 10.0
 DEFAULT_BATTERY_NEAR_EMPTY_CLEAR = 12.0
+DEFAULT_BATTERY_CALCULATED_CAPACITY_W = 0.0
+DEFAULT_BATTERY_ENERGY_TOPIC = "solar_assistant/total/battery_energy_out/state"
 DEFAULT_TG_TOKEN = "112233445:*****************"
 DEFAULT_TG_CHAT_IDS: list[str] = ["123456789"]
 
@@ -134,6 +136,20 @@ BATTERY_SOC_TOPIC = cfg_get_str(
     "solar_assistant/total/battery_state_of_charge/state",
 )
 BATTERY_JSON_FIELD = ""
+
+BATTERY_ENERGY_TOPIC = cfg_get_str(
+    CONFIG,
+    ["battery", "energy_topic"],
+    DEFAULT_BATTERY_ENERGY_TOPIC,
+)
+BATTERY_ENERGY_JSON_FIELD = ""
+
+BATTERY_CALCULATED_CAPACITY_W = cfg_get_float(
+    CONFIG,
+    ["battery", "calculated_capacity_w"],
+    DEFAULT_BATTERY_CALCULATED_CAPACITY_W,
+)
+BATTERY_CALCULATED_CAPACITY_KWH = BATTERY_CALCULATED_CAPACITY_W / 1000.0
 
 # Пороговые значения (Вт и %)
 GRID_MIN_VOLT = cfg_get_float(CONFIG, ["grid", "min_voltage"], DEFAULT_GRID_MIN_VOLT)
@@ -386,7 +402,7 @@ class GridWatcher:
             ),
         ]
 
-        self.battery_events = [
+        self.battery_soc_events = [
             ThresholdEvent(
                 direction="above",
                 trigger=BATTERY_FULL_THRESHOLD,
@@ -414,6 +430,33 @@ class GridWatcher:
             ),
         ]
 
+        self.battery_energy_events: list[ThresholdEvent] = []
+
+        if BATTERY_CALCULATED_CAPACITY_KWH > 0:
+            half_capacity = BATTERY_CALCULATED_CAPACITY_KWH * 0.5
+            two_thirds_capacity = BATTERY_CALCULATED_CAPACITY_KWH * (2.0 / 3.0)
+
+            self.battery_energy_events = [
+                ThresholdEvent(
+                    direction="above",
+                    trigger=half_capacity,
+                    clear=0.0,
+                    message=(
+                        f"{TG_PREFIX}: 🔋 Аккумулятор отдал половину ёмкости "
+                        "({value_kwh:.2f} кВт⋅ч, {percent_of_capacity:.0f}% из {capacity_kwh:.2f} кВт⋅ч)"
+                    ),
+                ),
+                ThresholdEvent(
+                    direction="above",
+                    trigger=two_thirds_capacity,
+                    clear=0.0,
+                    message=(
+                        f"{TG_PREFIX}: 🔋 Аккумулятор отдал 2/3 ёмкости "
+                        "({value_kwh:.2f} кВт⋅ч, {percent_of_capacity:.0f}% из {capacity_kwh:.2f} кВт⋅ч)"
+                    ),
+                ),
+            ]
+
     # Новый прототип on_connect для v5
     def on_connect(self, client, userdata, flags, reason_code, properties=None):
         print(f"[MQTT] Connected, rc={reason_code}")
@@ -422,6 +465,8 @@ class GridWatcher:
             client.subscribe(LOAD_TOPIC, qos=1)
         if BATTERY_SOC_TOPIC:
             client.subscribe(BATTERY_SOC_TOPIC, qos=1)
+        if BATTERY_ENERGY_TOPIC and BATTERY_CALCULATED_CAPACITY_KWH > 0:
+            client.subscribe(BATTERY_ENERGY_TOPIC, qos=1)
 
     def on_message(self, client, userdata, msg):
         now = time.time()
@@ -448,6 +493,14 @@ class GridWatcher:
 
         if topic == BATTERY_SOC_TOPIC and BATTERY_SOC_TOPIC:
             self.process_battery_payload(payload, now)
+            return
+
+        if (
+            BATTERY_ENERGY_TOPIC
+            and topic == BATTERY_ENERGY_TOPIC
+            and BATTERY_CALCULATED_CAPACITY_KWH > 0
+        ):
+            self.process_battery_energy_payload(payload, now)
             return
 
         # Неизвестный топик — логируем для отладки
@@ -532,11 +585,37 @@ class GridWatcher:
 
         grid_present = self.current_grid_state()
 
-        for event in self.battery_events:
+        for event in self.battery_soc_events:
             if event.require_grid and not grid_present:
                 continue
             if event.evaluate(percent, now):
                 msg = event.message.format(percent=percent, value=percent)
+                broadcast_telegram(msg)
+
+    def process_battery_energy_payload(self, payload: str, now: float) -> None:
+        """Отправляет уведомления по энергии, отданной батареей."""
+
+        value = extract_numeric(payload, BATTERY_ENERGY_JSON_FIELD)
+        if value is None:
+            print(f"[WARN] Can't parse battery energy value: {payload[:200]}")
+            return
+
+        energy_kwh = max(0.0, value)
+
+        for event in self.battery_energy_events:
+            if event.evaluate(energy_kwh, now):
+                percent_of_capacity = (
+                    0.0
+                    if BATTERY_CALCULATED_CAPACITY_KWH <= 0
+                    else min(100.0, (energy_kwh / BATTERY_CALCULATED_CAPACITY_KWH) * 100.0)
+                )
+                msg = event.message.format(
+                    value=energy_kwh,
+                    value_kwh=energy_kwh,
+                    percent=percent_of_capacity,
+                    percent_of_capacity=percent_of_capacity,
+                    capacity_kwh=BATTERY_CALCULATED_CAPACITY_KWH,
+                )
                 broadcast_telegram(msg)
 
     def current_grid_state(self) -> bool:
