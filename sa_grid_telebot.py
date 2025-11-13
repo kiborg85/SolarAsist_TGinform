@@ -249,6 +249,7 @@ class ThresholdEvent:
     message: str
     active: bool = False
     last_sent: float = 0.0
+    require_grid: bool = False
 
     def evaluate(self, value: float, now: float) -> bool:
         """Возвращает True, если нужно отправить уведомление."""
@@ -391,6 +392,7 @@ class GridWatcher:
                 trigger=BATTERY_FULL_THRESHOLD,
                 clear=BATTERY_FULL_CLEAR,
                 message=f"{TG_PREFIX}: 🔋 Батарея зарядилась ({{percent:.0f}}%)",
+                require_grid=True,
             ),
             ThresholdEvent(
                 direction="below",
@@ -528,10 +530,23 @@ class GridWatcher:
 
         percent = max(0.0, min(100.0, value))
 
+        grid_present = self.current_grid_state()
+
         for event in self.battery_events:
+            if event.require_grid and not grid_present:
+                continue
             if event.evaluate(percent, now):
                 msg = event.message.format(percent=percent, value=percent)
                 broadcast_telegram(msg)
+
+    def current_grid_state(self) -> bool:
+        """Возвращает True, если известно, что городская сеть присутствует."""
+
+        if self.last_observed_state is not None:
+            return bool(self.last_observed_state)
+        if self.last_sent_state is not None:
+            return bool(self.last_sent_state)
+        return False
 
     def run(self):
         self.client.connect(MQTT_HOST, MQTT_PORT, keepalive=MQTT_KEEPALIVE)
